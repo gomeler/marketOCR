@@ -365,23 +365,13 @@ def process_market_order_message(text):
     return order_directory, order_file
 
 def read_market_orders(order_directory, order_file):
-    # Going to just save all the data from the CSV, even if a lot of it isn't useful.
     columns = "orderID,typeID,charID,charName,regionID,regionName,stationID,stationName,range,bid,price,volEntered,volRemaining,issueDate,orderState,minVolume,accountID,duration,isCorp,solarSystemID,solarSystemName,escrow".split(",")
     orders = []
-    # This might need to be a custom class?
     with open(order_directory + order_file) as csv_file:
-        csv_reader = csv.reader(csv_file, delimiter=",")
-        line_count = 0
+        csv_reader = csv.DictReader(csv_file, delimiter=",")
         for row in csv_reader:
-            if line_count > 0:
-                entry = dict(zip(columns, row))
-                orders.append(entry)
-            line_count += 1
+            orders.append(row)
     return orders
-
-
-
-
 
 
 def get_clipboard():
@@ -391,16 +381,5 @@ def get_clipboard():
     return text
 
 
-
-
 if __name__ == "__main__":
     print("I solemnly swear that I'm up to no good.")
-
-
-
-
-
-
-
-
-
