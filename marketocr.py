@@ -32,6 +32,7 @@ import screeninteraction
 # For some reason windll.user32.PrintWindow is failing to dump the image to the bitmap.
 
 #TODO: Perhaps a custom class is needed for scaled images, so I can have the image and the resize_factor linked.
+# TODO: cache the location of on-screen elements and perform restricted tesseract checks vs scanning the full screen.
 
 class Screenshot(object):
     def __init__(self, windowname):
@@ -276,110 +277,155 @@ class HOCRParser(object):
             rescaled_lines.append(line)
         return rescaled_lines
 
+class ExportOrderProcessor(object):
+    # ExportOrderProcessor simply exports and loads market orders so we can use easily use them.
+    def __init__(self, window_name, main_screenshot, main_parser, mouse, type_processor):
+        # ExportOrderProcessor will re-use the same screen capture and HOCRParser for most operations.
+        # Temporary copies will be used for handling prompts.
+        self.window_name = window_name
+        self.main_screenshot = main_screenshot
+        self.main_parser = main_parser
+        self.mouse = mouse
+        self.hocr_data = None
+        self.typeIDs = type_processor
+        self.market_orders = None
+        self.order_directory = None
 
+    def export_wallet_orders(self):
+        # This will go about exporting the character's market orders via the wallet export feature.
+        self.mouse.set_focus((20, 5))
+        # At the bottom of the wallet is an export button. Press it.
+        self.click_on_wallet_export()
 
-def click_on_wallet_export(screenshot, hocrparser, mouse):
-    # An important assumption is made here, screenshot and hocrparser contain data from a wallet screen scrape.
-    # Luckily the export button is typically bounded left/right by the word BUYING within the wallet.
-    # I've been lucky so far in that tesseract has yet to fail to 100% identify BUYING and Export.
-    mouse.set_focus((20, 5))
-    buying = hocrparser.find_word("BUYING", hocrparser.parsed_words)
-    export = hocrparser.find_word_bounded_horizontal("Export", buying, hocrparser.parsed_words)
-    # Until it proves otherwise, I will assume that "Export" resides within the left/right values of BUYING, but several hundreds of pixels lower. There's a solid chance that the market order Export button will also be visible, so restrict our search to results inside of this range.
-    # For test purposes, let's draw a box on the export button.
-    boxed = screenshot.draw_bounding_box(screenshot.inverted_screenshot, export)
-    cv2.imwrite("boxed.png", boxed)
-    # Let's click that button.
-    export_coords = mouse.calculate_point_from_bbox(export)
-    mouse.click(export_coords, click_type="left")
+        # This will create a prompt that we will interact with to ascertain the location of the market log.
+        # First detect the alert on the screen.
+        # TODO: save the location of the prompt for re-use. If we run this frequently, we can snapshot
+        # a limited part of the screen just to verify the OK and Personal Market Export components are visible.
+        personal_market_export, ok_button = self.map_export_alert()
 
-def handle_export_alert(window_name):
-    # Temporary stuff to prevent from overriding the main screen screenshot.
-    time.sleep(1) # Uhh.. we might be moving faster than the EVE client can render stuff.
-    screenshot = Screenshot(window_name)
-    # This is here for testing purposes.
-    screenshot.application_snapshot()
-    screenshot.screenshot = screenshot.resize_image(screenshot.screenshot, screenshot.resize_factor)
-    screenshot.invert_image()
-    screenshot.save_snapshot(screenshot.inverted_screenshot, "inverted2.png")
-    hocr = screenshot.parse_image(screenshot.inverted_screenshot)
-    hocrparser = HOCRParser()
-    hocrparser.make_soup(hocr)
-    hocrparser.parse_soup()
-    hocrparser.process_hocr()
-    hocrparser.parsed_lines = hocrparser.clean_results(hocrparser.parsed_lines)
-    hocrparser.parsed_words = hocrparser.clean_results(hocrparser.parsed_words)
-    hocrparser.parsed_lines = hocrparser.rescale_parsed_lines(hocrparser.parsed_lines, screenshot.resize_factor)
-    hocrparser.parsed_words = hocrparser.rescale_parsed_lines(hocrparser.parsed_words, screenshot.resize_factor)
-    # We will key off of two keywords, OK, and Personal Market Export.
-    # These two keywords have a very high hit-rate with tesseract.
-    personal_market_export = hocrparser.find_word("Personal", hocrparser.parsed_words)
-    ok_button = hocrparser.find_word("OK", hocrparser.parsed_words)
-    return personal_market_export, ok_button
+        # With the key words located, we can interact with the prompt and pull out the alert.
+        # There are some assumptions made from looking at this prompt. text_bbox is roughly in the middle
+        # of the prompt, which is sufficient for our requirements.
+        separation = ok_button.get("top") - personal_market_export.get("bottom")
+        mid_point = personal_market_export.get("bottom") + int(separation)/2
+        top = mid_point - int(separation/6)
+        bottom = mid_point + int(separation/6)
+        text_bbox = {
+            "left": personal_market_export.get("left"),
+            "right": personal_market_export.get("right"),
+            "top": int(top),
+            "bottom": int(bottom)
+        }
+        text_coords = self.mouse.calculate_point_from_bbox(text_bbox)
 
-def export_wallet_orders(screenshot, hocrparser, mouse):
-    # After the initial screen scrape we need to go through the process of exporting and the ingesting the character's market orders.
-    mouse.set_focus((20, 5))
-    click_on_wallet_export(screenshot, hocrparser, mouse)
+        # With the generated coordinates, copy the alert text
+        alert_text = self.copy_export_alert(text_coords)
 
-    # This will create a prompt that we will interact with to ascertain the location of the market log.
-    # This has to be resized for tesseract to pick up the OK button.
-    personal_market_export, ok_button = handle_export_alert(screenshot.windowname)
-    separation = ok_button.get("top") - personal_market_export.get("bottom")
-    mid_point = personal_market_export.get("bottom") + int(separation)/2
-    print(f"Separation: {separation}")
-    print(f"Midpoint: {mid_point}")
-    # Making more assumptions that we've roughly generated a bbox that contains the warning text.
-    top = mid_point - int(separation/6)
-    bottom = mid_point + int(separation/6)
-    text_bbox = {
-        "left": personal_market_export.get("left"),
-        "right": personal_market_export.get("right"),
-        "top": int(top),
-        "bottom": int(bottom)
-    }
-    text_coords = mouse.calculate_point_from_bbox(text_bbox)
-    # Double click
-    mouse.click(text_coords, click_type="left")
-    mouse.click(text_coords, click_type="left")
-    # ctrl + a
-    mouse.pressAndHold("ctrl")
-    mouse.press("a")
-    # ctrl + c
-    mouse.press("c")
-    mouse.release("ctrl")
-    # enter
-    mouse.press("enter")
-    # Get data from the clipboard.
-    text = get_clipboard()
-    print(text)
-    return text
+        # The alert text contains a filename and directory where the market order was exported to.
+        order_directory, order_file = self.process_market_order_alert(alert_text)
 
-def process_market_order_message(text):
-    # Some hard-coded values here as the message seems pretty standard.
-    file_index = text.index("file")
-    in_index = text.index("in")
-    order_file = text[file_index+5:in_index-1]
-    directory_index = text.index("directory")
-    order_directory = text[directory_index+10:]
-    return order_directory, order_file
+        # Import the orders
+        market_orders = self.read_market_orders(order_directory, order_file)
 
-def read_market_orders(order_directory, order_file):
-    columns = "orderID,typeID,charID,charName,regionID,regionName,stationID,stationName,range,bid,price,volEntered,volRemaining,issueDate,orderState,minVolume,accountID,duration,isCorp,solarSystemID,solarSystemName,escrow".split(",")
-    orders = []
-    with open(order_directory + order_file) as csv_file:
-        csv_reader = csv.DictReader(csv_file, delimiter=",")
-        for row in csv_reader:
-            orders.append(row)
-    return orders
+        # Orders by default use a typeID for each item, convert that to something useful.
+        better_orders = self.translate_typeIDs(market_orders)
 
+        # Store the important data for future use.
+        self.market_orders = better_orders
+        self.order_directory = order_directory
 
-def get_clipboard():
-    win32clipboard.OpenClipboard()
-    text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-    win32clipboard.CloseClipboard()
-    return text
+    def click_on_wallet_export(self):
+        # An important assumption is made here, screenshot and hocrparser contain data from a wallet screen scrape.
+        # Luckily the export button is typically bounded left/right by the word BUYING within the wallet.
+        # I've been lucky so far in that tesseract has yet to fail to 100% identify BUYING and Export.
+        buying = self.main_parser.find_word("BUYING", self.main_parser.parsed_words)
+        export = self.main_parser.find_word_bounded_horizontal("Export", buying, self.main_parser.parsed_words)
+        # Until it proves otherwise, I will assume that "Export" resides within the left/right values of BUYING, but several hundreds of pixels lower. There's a solid chance that the market order Export button will also be visible, so restrict our search to results inside of this range.
 
+        # Let's click that button.
+        export_coords = self.mouse.calculate_point_from_bbox(export)
+        self.mouse.click(export_coords, click_type="left")
+
+    def map_export_alert(self):
+        # This alert is a temporary prompt. We will create temporary snapshot/parser objects vs juggling the main screen objects.
+        time.sleep(1) # Uhh.. we might be moving faster than the EVE client can render stuff.
+        #TODO: use cv2 template matching to watch the screen
+        # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_template_matching/py_template_matching.html
+        screenshot = Screenshot(self.window_name)
+        screenshot.application_snapshot()
+        # This has to be resized for tesseract to pick up the OK button.
+        screenshot.screenshot = screenshot.resize_image(screenshot.screenshot, screenshot.resize_factor)
+        screenshot.invert_image()
+        hocr = screenshot.parse_image(screenshot.inverted_screenshot)
+
+        # Parse the result.
+        hocrparser = HOCRParser()
+        hocrparser.make_soup(hocr)
+        hocrparser.parse_soup()
+        hocrparser.process_hocr()
+        hocrparser.parsed_lines = hocrparser.clean_results(hocrparser.parsed_lines)
+        hocrparser.parsed_words = hocrparser.clean_results(hocrparser.parsed_words)
+        hocrparser.parsed_lines = hocrparser.rescale_parsed_lines(hocrparser.parsed_lines, screenshot.resize_factor)
+        hocrparser.parsed_words = hocrparser.rescale_parsed_lines(hocrparser.parsed_words, screenshot.resize_factor)
+
+        # We will key off of two keywords, OK, and Personal Market Export.
+        # These two keywords have a very high hit-rate with tesseract.
+        personal_market_export = hocrparser.find_word("Personal", hocrparser.parsed_words)
+        ok_button = hocrparser.find_word("OK", hocrparser.parsed_words)
+        return personal_market_export, ok_button
+
+    def copy_export_alert(self, text_coords):
+        # Provided a bbox of the rough location of the alert, copy the text to the clipboard and return it.
+        # Double click on the alert.
+        self.mouse.click(text_coords, click_type="left")
+        self.mouse.click(text_coords, click_type="left")
+        # ctrl + a
+        self.mouse.pressAndHold("ctrl")
+        self.mouse.press("a")
+        # ctrl + c
+        self.mouse.press("c")
+        self.mouse.release("ctrl")
+        # enter
+        self.mouse.press("enter")
+
+        # Get data from the clipboard.
+        text = self.get_clipboard()
+        return text
+
+    def process_market_order_alert(self, text):
+        # Some hard-coded values here as the message seems pretty standard.
+        file_index = text.index("file")
+        in_index = text.index("in")
+        order_file = text[file_index+5:in_index-1]
+        directory_index = text.index("directory")
+        order_directory = text[directory_index+10:]
+        return order_directory, order_file
+
+    def read_market_orders(self, order_directory, order_file):
+        # Read in the market order file and return the contents.
+        #columns = "orderID,typeID,charID,charName,regionID,regionName,stationID,stationName,range,bid,price,volEntered,volRemaining,issueDate,orderState,minVolume,accountID,duration,isCorp,solarSystemID,solarSystemName,escrow".split(",")
+        orders = []
+        with open(order_directory + order_file) as csv_file:
+            csv_reader = csv.DictReader(csv_file, delimiter=",")
+            for row in csv_reader:
+                orders.append(row)
+        return orders
+
+    def translate_typeIDs(self, orders):
+        # Translate the typeID to the English name for each order.
+        for order in orders:
+            item_name = self.typeIDs.get(order.get("typeID"))
+            if item_name:
+                order["itemName"] = item_name
+            else:
+                raise Exception(f"Failed to convert typeID: {order.get('typeID')}. Is this a new typeID?") 
+        return orders
+
+    def get_clipboard(self):
+        win32clipboard.OpenClipboard()
+        text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+        win32clipboard.CloseClipboard()
+        return text
 
 if __name__ == "__main__":
     print("I solemnly swear that I'm up to no good.")

@@ -12,6 +12,8 @@ import win32gui
 #TODO: There are a lot of sleeps around mouse interactions that might not be necessary.
 # I was running into issues where the interface seemed to be lagging and the mouse was
 # moving/clicking too fast.
+# TODO: double click is needed.
+
 # Yanked from https://gist.github.com/chriskiehl/2906125
 VK_CODE = {'backspace':0x08,
            'tab':0x09,
