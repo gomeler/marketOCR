@@ -181,19 +181,33 @@ class ScreenInteraction(object):
         # This might be unnecessary.
         time.sleep(0.10)
 
-    def click(self, coords, click_type="left", duration=0.200):
-        # Perform a left click at coords with a duration between click and release.
-        # Default duration of 200ms seemed reasonable.
+    def click_duration(self, duration):
         mu = duration
         sigma = duration*0.20
+        click_duration = numpy.random.normal(mu, sigma, 1)[0]
+        return click_duration
+
+    def click_create_coords(self, coords):
         # The coordinates provided will need to be adjusted to be in reference to the actual
         # desktop coordinates of the window we're interacting with.
         # In short, we'll be treating 0,0 as the top left corner of the game window, and 
         # ScreenInteraction will be responsible for adjusting the offsets.
         x_coord = coords[0] + self.window.get('left')
         y_coord = coords[1] + self.window.get('top')
-        click_duration = numpy.random.normal(mu, sigma, 1)[0]
-        print(f"ScreenInteraction placing mouse at: {x_coord}, {y_coord} with duration: {click_duration}")
+        return (x_coord, y_coord)
+
+    def click_event(self, click_down, click_up, duration, coords):
+            win32api.mouse_event(click_down, coords[0], coords[1], 0, 0)
+            time.sleep(duration)
+            win32api.mouse_event(click_up, coords[0], coords[1], 0, 0)
+
+    def click(self, coords, click_type="left", duration=0.200, double=False):
+        # Perform a left click at coords with a duration between click and release.
+        # Default duration of 75ms seemed reasonable.
+        click_duration = self.click_duration(duration)
+        coords = self.click_create_coords(coords)
+
+        print(f"ScreenInteraction placing mouse at: {coords[0]}, {coords[1]} with duration: {click_duration}")
         if click_type == "left":
             click_down = win32con.MOUSEEVENTF_LEFTDOWN
             click_up = win32con.MOUSEEVENTF_LEFTUP
@@ -203,16 +217,25 @@ class ScreenInteraction(object):
         else:
             raise Exception(f"Unknown click type {click_type}")
         self.set_window_active()
-        win32api.SetCursorPos((x_coord, y_coord))
-        # Might be unnecessary.
-        time.sleep(0.25)
-        win32api.mouse_event(click_down, x_coord, y_coord, 0, 0)
-        time.sleep(click_duration)
-        win32api.mouse_event(click_up, x_coord, y_coord, 0, 0)
+        win32api.SetCursorPos(coords)
+        # The UI seems to be VERY slow to respond to the mouse. When positioning the mouse, we have to wait a short period of time for the UI to register it.
+        time.sleep(click_duration/2)
+        if double:
+            self.click_event(click_down, click_up, click_duration/4, coords)
+            time.sleep(click_duration/4)
+            self.click_event(click_down, click_up, click_duration/4, coords)            
+        else:
+            self.click_event(click_down, click_up, click_duration, coords)
 
-    def calculate_point_from_bbox(self, bbox):
+    def calculate_point_from_bbox(self, bbox, offset_bbox=None):
         # tesseract-OCR provides bbox coords for words/lines. With that data we then
         # need to determine a singular point within that bbox to click.
+        if offset_bbox:
+            # Sometimes functions want to click on something on the screen, but they're operating with a limited snapshot of a portion of the screen. Convert the coordinates for their limited snapshot to the whole window.
+            bbox["left"] = bbox.get("left") + offset_bbox.get("left")
+            bbox["right"] = bbox.get("right") + offset_bbox.get("left")
+            bbox["top"] = bbox.get("top") + offset_bbox.get("top")
+            bbox["bottom"] = bbox.get("bottom") + offset_bbox.get("top")
         x_coord = random.randint(bbox.get('left'), bbox.get('right'))
         y_coord = random.randint(bbox.get('top'), bbox.get('bottom'))
         return (x_coord, y_coord)
