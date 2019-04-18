@@ -40,6 +40,7 @@ import screeninteraction
 # TODO: Glob matching for filenames instead of pulling in the orders via a copy/paste option.
 # TODO: make a note, remove the ticker from the market.
 # TODO: location named Expert conflicts with Export search for wallet order export. Solve that conflict.
+# NOTE: Template matching is blazing fast vs OCR, and easy to correct if the interface changes.
 
 # Static templates used for checking the screen for standard elements.
 ORDER_TEMPLATE = "templates/order_template.png"
@@ -72,7 +73,6 @@ class Screenshot(object):
     def load_template(self, template):
         # There are time where we'll use the Screenshot class with a saved image.
         self.screenshot = cv2.imread(template)
-
 
     def set_bbox(self, bbox):
         # Sometimes we want to restrict a snapshot to a portion of the target window.
@@ -159,13 +159,13 @@ class Screenshot(object):
     def template_match(self, image, template):
         # Searches the image for a match to the provided template. This is used for finding static screen elements like right-click menus.
         res = cv2.matchTemplate(image, template, cv2.TM_CCORR_NORMED)
-        _, _, _, max_loc = cv2.minMaxLoc(res)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
         left = max_loc[0]
         top = max_loc[1]
         # Wow.. shape is returning height, width, channels vs the documented width, height, channels.
         right = left + template.shape[1]
         bottom = top + template.shape[0]
-        return {"left": left, "top": top, "right": right, "bottom": bottom}
+        return {"left": left, "top": top, "right": right, "bottom": bottom, "max_confidence_val": max_val}
 
     def template_check(self, image, template_filename):
         # There are several pre-selected templates that we will use. This simplifies life.
@@ -651,6 +651,15 @@ class GameManipulator(object):
         self.buy_snapshot = buy_snapshot
         self.sell_snapshot = sell_snapshot
 
+    def prepare(self):
+        # This combines several steps that are needed for GameManipulator to actually perform its actions.
+        # This primarily exists as the way to init GameManipulator in use vs testing each function in dev/test.
+        self.locate_keywords()
+        self.estimate_window_layout()
+        self.create_snapshots()
+        self.order_template_parser = self.process_template(ORDER_TEMPLATE)
+        self.modify_template_parser = self.process_template(MODIFY_TEMPLATE)
+
     def parse_snapshot(self, snapshot, order_type="buy"):
         # Given a buy/sell snapshot and order list, return the coordinates of the visible orders.
         hocr = snapshot.snapshot_resize_parse()
@@ -678,19 +687,9 @@ class GameManipulator(object):
             else:
                 copy_order["bbox"] = None    
                 copy_order["found"] = False
-            # Correct the order bbox values to mate up with the original 0,0 indexed image.
-            #self.correct_order_bbox(copy_order, coords)
             visible_orders.append(copy_order)
 
         return visible_orders
-
-    def correct_order_bbox(self, order, associated_coords):
-        # Our buy/sell orders will contain bbox coordinates that relate to the constrained area that we searched. Need to correct those coordinates so they apply to the full-sized image indexed at 0,0.
-        bbox = order.get("bbox")
-        order["bbox"]["left"] = bbox.get("left") + associated_coords.get("left")
-        order["bbox"]["right"] = bbox.get("right") + associated_coords.get("left")
-        order["bbox"]["top"] = bbox.get("top") + associated_coords.get("top")
-        order["bbox"]["bottom"] = bbox.get("bottom") + associated_coords.get("top")
 
     def load_order_market(self, order, snapshot):
         # Double clicking on the item will cause the market to load.
@@ -709,8 +708,6 @@ class GameManipulator(object):
                 print("At loop iteraction %s and item %s not detected" % (i, order.get("itemName")))
             if i == 4:
                 raise Exception("Item %s never loaded." % order.get("itemName"))
-        # Export the item market data.
-        
 
     def check_market_for_item(self, item):
         # Using Tesseract, check to see if an item has been loaded.
@@ -718,10 +715,8 @@ class GameManipulator(object):
         snapshot.find_target_window()
         snapshot.set_bbox(self.market_item_coords)
         hocr = snapshot.snapshot_resize_parse()
-
         parser = HOCRParser()
         parser.hocr_parse_rescale(hocr, snapshot.resize_factor)
-
         result = parser.find_words(item, parser.parsed_lines)
         return result
 
@@ -740,68 +735,41 @@ class GameManipulator(object):
         # Click on the order to bring up the interaction prompt.
         mouse_coords = self.mouse.calculate_point_from_bbox(order.get("bbox"), offset_bbox=snapshot.screenshot_bbox)
         self.mouse.click(mouse_coords, click_type="right")
-        time.sleep(1.50)
-        #TODO: Restrict the screen to eliminate false positives. Think it's safe to just use the wallet window.
-        # Add another method that just performs the snapshot/invert/resize without the parse.
-        snapshot.application_snapshot()
-        template_result = snapshot.template_check(snapshot.screenshot, ORDER_TEMPLATE)
-        snapshot.save_snapshot(snapshot.screenshot, "original.png")
-
-        
-        #snapper = copy.deepcopy(snapshot)
-        #hocr = snapper.application_snapshot()
-        #snapper.draw_bounding_box(snapper.screenshot, template_result)
-        #snapper.save_snapshot(snapper.screenshot, "screen.png")
-
-        # This information should be stored for future use.
-        modify_parser = self.process_template(ORDER_TEMPLATE)
-        modify_coords = modify_parser.find_word("Modify", modify_parser.parsed_words)
-        # Due to the template coords being a set of nested coords, we need to combine two levels so we only have a single offset.
-        combined_coords = template_result
-        combined_top = combined_coords["top"]
-        combined_left = combined_coords["left"]
-        combined_coords["top"] += modify_coords.get("top")
-        combined_coords["bottom"] = combined_top + modify_coords.get("bottom")
-        combined_coords["left"] += modify_coords.get("left")
-        combined_coords["right"] = combined_left + modify_coords.get("right")
-
+        self.watch_for_template(self.main_window, ORDER_TEMPLATE)
+        # NOTE: This can be sped up by using portion of the screen around where we think the prompt will appear.
+        # I chose not to use this proposed solution to simplify this template matching section for now.
+        # For reference, processing time went from 240ms to 70ms on a 7700k when using 2x full-screen template match vs 2x ~1/4 screen matches.
+        self.main_window.application_snapshot()
+        order_template_result = self.main_window.template_check(self.main_window.screenshot, ORDER_TEMPLATE)
+        # Locate where the Modify keyword is within the template.
+        modify_coords = self.order_template_parser.find_word("Modify", self.order_template_parser.parsed_words)
         # Click on modify from the right click order menu.
-        modify_mouse_coords = self.mouse.calculate_point_from_bbox(combined_coords, offset_bbox=snapshot.screenshot_bbox)
+        modify_mouse_coords = self.mouse.calculate_point_from_bbox(modify_coords, offset_bbox=order_template_result)
         self.mouse.click(modify_mouse_coords)
-        time.sleep(0.50)
 
+        self.watch_for_template(self.main_window, MODIFY_TEMPLATE)
         # Locate the modify order window on the main window.
-        main_window_snapshot = Screenshot(self.main_window.windowname)
-        main_window_snapshot.find_target_window()
-        main_window_snapshot.application_snapshot()
-        modify_window_coords = main_window_snapshot.template_check(main_window_snapshot.screenshot, MODIFY_TEMPLATE)
-        img_cpy = main_window_snapshot.draw_bounding_box(copy.copy(main_window_snapshot.screenshot), modify_window_coords)
-        main_window_snapshot.save_snapshot(img_cpy, "modify_order_snap.png")
+        self.main_window.application_snapshot()
+        modify_template_result = self.main_window.template_check(self.main_window.screenshot, MODIFY_TEMPLATE)
+        # TODO: Actually change the price.
 
-        # Modify Order Window Parser
-        tmp = Screenshot(None)
-        tmp.load_template(MODIFY_TEMPLATE)
-        hocr = tmp.base_resize_parse()
-        template_parser = HOCRParser()
-        template_parser.hocr_parse_rescale(hocr, tmp.resize_factor)
-        # Click a button.
-        ok_button = template_parser.find_word("Cancel", template_parser.parsed_words)
-        # Combining stuff again due to template matching and nested coords.
-        combined_coords = modify_window_coords
-        combined_top = combined_coords["top"]
-        combined_left = combined_coords["left"]
-        combined_coords["top"] += ok_button.get("top")
-        combined_coords["bottom"] = combined_top + ok_button.get("bottom")
-        combined_coords["left"] += ok_button.get("left")
-        combined_coords["right"] = combined_left + ok_button.get("right")
-        img_cpy = main_window_snapshot.draw_bounding_box(copy.copy(main_window_snapshot.screenshot), ok_button)
-        main_window_snapshot.save_snapshot(img_cpy, "ok_button_snap.png")
-        ok_button_mouse_coords = self.mouse.calculate_point_from_bbox(combined_coords)
+
+        # Locate where the Ok button is within the template.
+        ok_button = self.modify_template_parser.find_word("Cancel", self.modify_template_parser.parsed_words)
+        ok_button_mouse_coords = self.mouse.calculate_point_from_bbox(ok_button, offset_bbox=modify_template_result)
         self.mouse.click(ok_button_mouse_coords)
 
-
-
-
+    def watch_for_template(self, snapshot, template, confidence_val=0.50):
+        # Watch for 5x100ms, waiting for the provided template to present itself on the screen.
+        for i in range(5):
+            snapshot.application_snapshot()
+            template_match_attempt = snapshot.template_check(snapshot.screenshot, template)
+            print(template_match_attempt)
+            if template_match_attempt.get("max_confidence_val") > confidence_val:
+                return template_match_attempt
+            else:
+                time.sleep(0.100)
+        raise Exception("Failed to detect template: %s" % template)
 
 
 if __name__ == "__main__":
