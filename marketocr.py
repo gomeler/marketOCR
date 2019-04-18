@@ -39,9 +39,11 @@ import screeninteraction
 # TODO: Bot could configure the window columns in the buy/sell windows to sort 
 # TODO: Glob matching for filenames instead of pulling in the orders via a copy/paste option.
 # TODO: make a note, remove the ticker from the market.
+# TODO: location named Expert conflicts with Export search for wallet order export. Solve that conflict.
 
 # Static templates used for checking the screen for standard elements.
-MODIFY_TEMPLATE = "templates/modify_template.png"
+ORDER_TEMPLATE = "templates/order_template.png"
+MODIFY_TEMPLATE = "templates/modify_order_template.png"
 
 class Screenshot(object):
     def __init__(self, windowname):
@@ -66,6 +68,11 @@ class Screenshot(object):
             "height": height,
             "targetwindow": targetwindow
             }
+
+    def load_template(self, template):
+        # There are time where we'll use the Screenshot class with a saved image.
+        self.screenshot = cv2.imread(template)
+
 
     def set_bbox(self, bbox):
         # Sometimes we want to restrict a snapshot to a portion of the target window.
@@ -155,15 +162,17 @@ class Screenshot(object):
         _, _, _, max_loc = cv2.minMaxLoc(res)
         left = max_loc[0]
         top = max_loc[1]
-        right = left + template.shape[0]
-        bottom = top + template.shape[1]
+        # Wow.. shape is returning height, width, channels vs the documented width, height, channels.
+        right = left + template.shape[1]
+        bottom = top + template.shape[0]
         return {"left": left, "top": top, "right": right, "bottom": bottom}
 
     def template_check(self, image, template_filename):
         # There are several pre-selected templates that we will use. This simplifies life.
+        template = []
         template = cv2.imread(template_filename)
         # Verify template loaded.
-        if template:
+        if len(template) > 0:
             return self.template_match(image, template)
         raise Exception("Failed to load template file: %s", template_filename)
 
@@ -171,9 +180,14 @@ class Screenshot(object):
         # This pattern happens a lot, might as well lump this into one call.
         # Returns the hocr result from tesseract processing the created image.
         self.application_snapshot()
+        return self.base_resize_parse()
+
+    def base_resize_parse(self):
+        # Sometimes self.screenshot is pre-loaded vs snapped.
+        self.screenshot_original = copy.copy(self.screenshot)
         self.screenshot = self.resize_image(self.screenshot, self.resize_factor)
         self.invert_image()
-        return self.parse_image(self.inverted_screenshot)
+        return self.parse_image(self.inverted_screenshot)        
 
             
 class HOCRParser(object):
@@ -345,7 +359,6 @@ class ExportOrderProcessor(object):
 
     def export_wallet_orders(self):
         # This will go about exporting the character's market orders via the wallet export feature.
-        self.mouse.set_focus((50, 5))
         # Index the screen
         self.scrape_window()
         # At the bottom of the wallet is an export button. Press it.
@@ -640,16 +653,9 @@ class GameManipulator(object):
 
     def parse_snapshot(self, snapshot, order_type="buy"):
         # Given a buy/sell snapshot and order list, return the coordinates of the visible orders.
-        snapshot.application_snapshot()
-        snapshot.invert_image()
-        hocr = snapshot.parse_image(snapshot.inverted_screenshot)
-
+        hocr = snapshot.snapshot_resize_parse()
         parser = HOCRParser()
-        parser.make_soup(hocr)
-        parser.parse_soup()
-        parser.process_hocr()
-        parser.parsed_lines = parser.clean_results(parser.parsed_lines)
-        parser.parsed_words = parser.clean_results(parser.parsed_words)
+        parser.hocr_parse_rescale(hocr, snapshot.resize_factor)
 
         if order_type == "buy":
             coords = self.buy_coords
@@ -673,7 +679,7 @@ class GameManipulator(object):
                 copy_order["bbox"] = None    
                 copy_order["found"] = False
             # Correct the order bbox values to mate up with the original 0,0 indexed image.
-            self.correct_order_bbox(copy_order, coords)
+            #self.correct_order_bbox(copy_order, coords)
             visible_orders.append(copy_order)
 
         return visible_orders
@@ -686,10 +692,9 @@ class GameManipulator(object):
         order["bbox"]["top"] = bbox.get("top") + associated_coords.get("top")
         order["bbox"]["bottom"] = bbox.get("bottom") + associated_coords.get("top")
 
-    def load_order_market(self, order):
+    def load_order_market(self, order, snapshot):
         # Double clicking on the item will cause the market to load.
-        mouse_coords = self.mouse.calculate_point_from_bbox(order.get("bbox"))
-        self.mouse.set_focus((50, 5))
+        mouse_coords = self.mouse.calculate_point_from_bbox(order.get("bbox"), offset_bbox=snapshot.screenshot_bbox)
         self.mouse.click(mouse_coords, double=True)
         # Check that the correct item loaded in the market.
         for i in range(5):
@@ -699,6 +704,7 @@ class GameManipulator(object):
                 if result:
                     print("Item %s loaded" % order.get("itemName"))
                     break
+                time.sleep(0.50)
             except Exception:
                 print("At loop iteraction %s and item %s not detected" % (i, order.get("itemName")))
             if i == 4:
@@ -709,25 +715,93 @@ class GameManipulator(object):
     def check_market_for_item(self, item):
         # Using Tesseract, check to see if an item has been loaded.
         snapshot = Screenshot(self.main_window.windowname)
-        resize_factor = 4.0
         snapshot.find_target_window()
         snapshot.set_bbox(self.market_item_coords)
-        snapshot.application_snapshot()
-        snapshot.screenshot = snapshot.resize_image(snapshot.screenshot, resize_factor)
-        snapshot.invert_image()
-        snapshot.save_snapshot(snapshot.inverted_screenshot, "market.png")
-        hocr = snapshot.parse_image(snapshot.inverted_screenshot)
+        hocr = snapshot.snapshot_resize_parse()
+
         parser = HOCRParser()
-        parser.make_soup(hocr)
-        parser.parse_soup()
-        parser.process_hocr()
-        parser.parsed_lines = parser.clean_results(parser.parsed_lines)
-        parser.parsed_words = parser.clean_results(parser.parsed_words)
-        parser.parsed_lines = parser.rescale_parsed_lines(parser.parsed_lines, resize_factor)
-        parser.parsed_words = parser.rescale_parsed_lines(parser.parsed_words, resize_factor)
-        print(parser.parsed_lines)
+        parser.hocr_parse_rescale(hocr, snapshot.resize_factor)
+
         result = parser.find_words(item, parser.parsed_lines)
         return result
+
+    def process_template(self, template):
+        # Several templates will be used for quickly identifying elements on the screen.
+        # Processing a template once for multiple uses will save considerable processing time. This returns a HOCRParser object that can be used to find the location of the associated template.
+        tmp_screenshot = Screenshot(None)
+        tmp_screenshot.load_template(template)
+        hocr = tmp_screenshot.base_resize_parse()
+        parser = HOCRParser()
+        parser.hocr_parse_rescale(hocr, tmp_screenshot.resize_factor)
+        return parser
+
+    def modify_order(self, order, price_change, snapshot):
+        # Edit an order, changing the price to the provided value.
+        # Click on the order to bring up the interaction prompt.
+        mouse_coords = self.mouse.calculate_point_from_bbox(order.get("bbox"), offset_bbox=snapshot.screenshot_bbox)
+        self.mouse.click(mouse_coords, click_type="right")
+        time.sleep(1.50)
+        #TODO: Restrict the screen to eliminate false positives. Think it's safe to just use the wallet window.
+        # Add another method that just performs the snapshot/invert/resize without the parse.
+        snapshot.application_snapshot()
+        template_result = snapshot.template_check(snapshot.screenshot, ORDER_TEMPLATE)
+        snapshot.save_snapshot(snapshot.screenshot, "original.png")
+
+        
+        #snapper = copy.deepcopy(snapshot)
+        #hocr = snapper.application_snapshot()
+        #snapper.draw_bounding_box(snapper.screenshot, template_result)
+        #snapper.save_snapshot(snapper.screenshot, "screen.png")
+
+        # This information should be stored for future use.
+        modify_parser = self.process_template(ORDER_TEMPLATE)
+        modify_coords = modify_parser.find_word("Modify", modify_parser.parsed_words)
+        # Due to the template coords being a set of nested coords, we need to combine two levels so we only have a single offset.
+        combined_coords = template_result
+        combined_top = combined_coords["top"]
+        combined_left = combined_coords["left"]
+        combined_coords["top"] += modify_coords.get("top")
+        combined_coords["bottom"] = combined_top + modify_coords.get("bottom")
+        combined_coords["left"] += modify_coords.get("left")
+        combined_coords["right"] = combined_left + modify_coords.get("right")
+
+        # Click on modify from the right click order menu.
+        modify_mouse_coords = self.mouse.calculate_point_from_bbox(combined_coords, offset_bbox=snapshot.screenshot_bbox)
+        self.mouse.click(modify_mouse_coords)
+        time.sleep(0.50)
+
+        # Locate the modify order window on the main window.
+        main_window_snapshot = Screenshot(self.main_window.windowname)
+        main_window_snapshot.find_target_window()
+        main_window_snapshot.application_snapshot()
+        modify_window_coords = main_window_snapshot.template_check(main_window_snapshot.screenshot, MODIFY_TEMPLATE)
+        img_cpy = main_window_snapshot.draw_bounding_box(copy.copy(main_window_snapshot.screenshot), modify_window_coords)
+        main_window_snapshot.save_snapshot(img_cpy, "modify_order_snap.png")
+
+        # Modify Order Window Parser
+        tmp = Screenshot(None)
+        tmp.load_template(MODIFY_TEMPLATE)
+        hocr = tmp.base_resize_parse()
+        template_parser = HOCRParser()
+        template_parser.hocr_parse_rescale(hocr, tmp.resize_factor)
+        # Click a button.
+        ok_button = template_parser.find_word("Cancel", template_parser.parsed_words)
+        # Combining stuff again due to template matching and nested coords.
+        combined_coords = modify_window_coords
+        combined_top = combined_coords["top"]
+        combined_left = combined_coords["left"]
+        combined_coords["top"] += ok_button.get("top")
+        combined_coords["bottom"] = combined_top + ok_button.get("bottom")
+        combined_coords["left"] += ok_button.get("left")
+        combined_coords["right"] = combined_left + ok_button.get("right")
+        img_cpy = main_window_snapshot.draw_bounding_box(copy.copy(main_window_snapshot.screenshot), ok_button)
+        main_window_snapshot.save_snapshot(img_cpy, "ok_button_snap.png")
+        ok_button_mouse_coords = self.mouse.calculate_point_from_bbox(combined_coords)
+        self.mouse.click(ok_button_mouse_coords)
+
+
+
+
 
 
 if __name__ == "__main__":
