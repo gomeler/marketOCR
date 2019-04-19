@@ -533,7 +533,6 @@ class ExportWalletOrderProcessor(ExportOrderProcessor):
         ok = parser.find_word("OK", parser.parsed_words)
         return market, ok
 
-
 class GameManipulator(object):
     # GameManipulator consumes the output of ExportOrderProcessor and interacts with the game to manipulate orders.
     # It will work with both the screen and HOCR results, which are based on a screenshot starting at 0,0
