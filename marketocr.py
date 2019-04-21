@@ -536,10 +536,11 @@ class ExportWalletOrderProcessor(ExportOrderProcessor):
 class GameManipulator(object):
     # GameManipulator consumes the output of ExportOrderProcessor and interacts with the game to manipulate orders.
     # It will work with both the screen and HOCR results, which are based on a screenshot starting at 0,0
-    def __init__(self, main_window, main_parser, mouse):
+    def __init__(self, main_window, main_parser, mouse, orderbook):
         self.main_window = main_window
         self.main_parser = main_parser
         self.mouse = mouse
+        self.orderbook = orderbook
         self.market_orders = None
         self.buy_snapshot = None
         self.sell_snapshot = None
