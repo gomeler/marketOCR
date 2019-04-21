@@ -144,9 +144,10 @@ class Orderbook(object):
             items.append(self._convert_row_to_item(item))
         return items
 
-class InventoryLedger(object):
-    def __init__(self, orderbook):
-        self.orderbook = orderbook
+class Ledger(Orderbook):
+    # I chose to just subclass Orderbook as I see no reason why I'd need the database wrapper
+    # as a separate object. Keeping orderbook separate keeps its responsibilities very clear,
+    # with order/inventory logic residing in the Ledger.
 
     def process_orders(self, orders):
         # Given an array of order objects, iterate through them and check if an order already exists
@@ -154,22 +155,22 @@ class InventoryLedger(object):
         if len(orders) == 0:
             raise Exception("Zero orders received")
         for order in orders:
-            existing_order = self.orderbook.retrieve_buy_order(order.get("orderID"))
+            existing_order = self.retrieve_buy_order(order.get("orderID"))
             if existing_order:
                 inventory_entry = self._process_order_diff(existing_order, order)
                 if inventory_entry:
                     # If there is a volume change, inventory_entry gets set.
-                    self.orderbook.insert_inventory(inventory_entry)
+                    self.insert_inventory(inventory_entry)
                 # Regardless of volume change, update the order with fresh data.
-                self.orderbook.update_order(order)
+                self.update_order(order)
 
     def _process_order_diff(self, existing_order, new_order):
         # existing_order = entry in the database, new_order = line from marketorder csv
-        if new_order.get("volRemaining") < existing_order.get("volRemaining"):
-            volume_diff = existing_order.get("volRemaining") - new_order.get("volRemaining")
-            print("Volume changed for %s with volume diff of %s" % (new_order.get("itemName"), volume_diff))
+        if float(new_order.get("volRemaining")) < float(existing_order.get("volRemaining")):
+            volume_diff = str(float(existing_order.get("volRemaining")) - float(new_order.get("volRemaining")))
+            #print("Volume changed for %s with volume diff of %s" % (new_order.get("itemName"), volume_diff))
             item = {"typeID": existing_order.get("typeID"),
-            "typeName": existing_order.get("typeName"),
+            "itemName": existing_order.get("itemName"),
             "price": existing_order.get("price"), 
             "volume": volume_diff}
             return item

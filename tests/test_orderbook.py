@@ -101,3 +101,71 @@ class TestOrderbook(unittest.TestCase):
         retrieved_items = self.book.get_inventory("1337")
         self.assertEqual(len(retrieved_items), 1)
         self.assertEqual(item, retrieved_items[0])
+
+class TestLedger(unittest.TestCase):
+    def setUp(self):
+        self.db_file = "test.db"
+        self.ledger = orderbook.Ledger(self.db_file)
+        self.ledger.init_tables()
+
+    def tearDown(self):
+        del(self.ledger)
+        if os.path.exists(self.db_file):
+            os.remove(self.db_file)
+
+    def test_process_order_diff_positive(self):
+        new_order = {'orderID': '1337', 'typeID': '222', 'itemName': 'Antimatter Charge S',
+        'regionID': '10000002', 'regionName': 'The Forge', 'stationID': '42',
+        'stationName': 'Best Station', 'range': '-1', 'price': '1338.0', 'volEntered': '100',
+        'volRemaining': '98.0', 'issueDate': '2019-04-20 20:39:07.000', 'minVolume': '1', 'duration': '90',
+        'solarSystemID': '30000119', 'solarSystemName': 'Itamo', 'escrow': '500.0', 'bid': 'True'}
+
+        existing_order = {'orderID': '1337', 'typeID': '222', 'itemName': 'Antimatter Charge S',
+        'regionID': '10000002', 'regionName': 'The Forge', 'stationID': '42',
+        'stationName': 'Best Station', 'range': '-1', 'price': '1337.0', 'volEntered': '100',
+        'volRemaining': '100.0', 'issueDate': '2019-04-20 20:39:07.000', 'minVolume': '1', 'duration': '90',
+        'solarSystemID': '30000119', 'solarSystemName': 'Itamo', 'escrow': '500.0', 'bid': 'True'}
+
+        item = self.ledger._process_order_diff(existing_order, new_order)
+        self.assertEqual(item.get("price"), existing_order.get("price"))
+        expected_volume = str(float(existing_order.get("volRemaining")) - float(new_order.get("volRemaining")))
+        self.assertEqual(item.get("volume"), expected_volume)
+        self.assertEqual(item.get("itemName"), existing_order.get("itemName"))
+        self.assertEqual(item.get("typeID"), existing_order.get("typeID"))
+
+    def test_process_order_diff_negative(self):
+        order = {'orderID': '1337', 'typeID': '222', 'itemName': 'Antimatter Charge S',
+        'regionID': '10000002', 'regionName': 'The Forge', 'stationID': '42',
+        'stationName': 'Best Station', 'range': '-1', 'price': '1338.0', 'volEntered': '100',
+        'volRemaining': '98.0', 'issueDate': '2019-04-20 20:39:07.000', 'minVolume': '1', 'duration': '90',
+        'solarSystemID': '30000119', 'solarSystemName': 'Itamo', 'escrow': '500.0', 'bid': 'True'}
+        item = self.ledger._process_order_diff(order, order)
+        self.assertIsNone(item)
+
+    def test_process_orders_positive(self):
+        # Verify sunny-day logic. An entry should be put into the inventory table,
+        # and the order table should be updated.
+        order = {'orderID': '1337', 'typeID': '222', 'itemName': 'Antimatter Charge S',
+        'regionID': '10000002', 'regionName': 'The Forge', 'stationID': '42',
+        'stationName': 'Best Station', 'range': '-1', 'price': '1338.0', 'volEntered': '100',
+        'volRemaining': '98.0', 'issueDate': '2019-04-20 20:39:07.000', 'minVolume': '1', 'duration': '90',
+        'solarSystemID': '30000119', 'solarSystemName': 'Itamo', 'escrow': '500.0', 'bid': 'True'}
+
+        existing_order = {'orderID': '1337', 'typeID': '222', 'itemName': 'Antimatter Charge S',
+        'regionID': '10000002', 'regionName': 'The Forge', 'stationID': '42',
+        'stationName': 'Best Station', 'range': '-1', 'price': '1337.0', 'volEntered': '100',
+        'volRemaining': '100.0', 'issueDate': '2019-04-20 20:39:07.000', 'minVolume': '1', 'duration': '90',
+        'solarSystemID': '30000119', 'solarSystemName': 'Itamo', 'escrow': '500.0', 'bid': 'True'}
+
+        self.ledger.insert_order(existing_order)
+        self.ledger.process_orders([order])
+        retrieved_inventory = self.ledger.get_inventory(order.get("typeID"))
+        self.assertEqual(len(retrieved_inventory), 1)
+        self.assertEqual(retrieved_inventory[0].get("typeID"), order.get("typeID"))
+        retrieved_order = self.ledger.retrieve_buy_order(order.get("orderID"))
+        # Verify the new order equals the updated input "order".
+        self.assertEqual(order, retrieved_order)
+
+    def test_process_orders_zero_length_exception(self):
+        with self.assertRaises(Exception):
+            self.ledger.process_orders([])
