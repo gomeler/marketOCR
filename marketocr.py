@@ -521,6 +521,20 @@ class ExportMarketOrderProcessor(ExportOrderProcessor):
         ok = parser.find_word("OK", parser.parsed_words)
         return market, ok
 
+    def get_top_buy_order(self, stationID=None):
+        # Working against the stored orders in self.buy_orders, return the highest order in regards to price.
+        orders = self.buy_orders
+        if stationID:
+            orders = [order for order in self.buy_orders if order.get("stationID") == stationID]
+        return max(orders, key= lambda x:x["price"])
+
+    def get_top_sell_order(self, stationID=None):
+        # Working against the stored orders in self.sell_orders, return the lowest order in regards to price.
+        orders = self.sell_orders
+        if stationID:
+            orders = [order for order in self.sell_orders if order.get("stationID") == stationID]
+        return min(orders, key = lambda x:x["price"])
+
 class ExportWalletOrderProcessor(ExportOrderProcessor):
     def locate_keywords(self):
         # This needs to be implemented for each sub-class. This should in theory just locate Export/Export to File for wallet/market exports respectively.
@@ -544,6 +558,12 @@ class GameManipulator(object):
         self.market_orders = None
         self.buy_snapshot = None
         self.sell_snapshot = None
+
+    def set_market_orders(self, wallet):
+        self.market_orders = {
+            "buy": wallet.buy_orders,
+            "sell": wallet.sell_orders
+        }
 
     def locate_keywords(self):
         # We depend on a couple of special keywords on the primary screen. Knowing their location helps considerably with interacting with it.
@@ -730,6 +750,58 @@ class GameManipulator(object):
         parser.hocr_parse_rescale(hocr, tmp_screenshot.resize_factor)
         return parser
 
+    def manipulate_order(self, market_processor, target_order, snapshot):
+        # TODO: In the future discrete rules for buy/sell behavior needs to somehow be passed in.
+        # I think a market logic object is needed to handle this.
+        # Load the market window for the target order.
+        self.load_order_market(target_order, snapshot)
+        # Export the market orders
+        market_processor.scrape_window()
+        market_processor.export_wallet_orders()
+        # Branch based on buy/sell
+        if target_order.get("bid"):
+            # Buy order
+            self._manipulate_buy_order(market_processor, target_order, snapshot)
+        else:
+            self._manipulate_sell_order(market_processor, target_order)
+
+
+    def _manipulate_buy_order(self, market_processor, target_order, snapshot):
+        # Buy orders are the easier order type to handle.
+        # Until an order logic object is implemented, this is the logic I will use:
+        # Check if our order is the highest order within the station.
+        # If so, leave the order alone.
+        # Otherwise, check to see what the highest order is within the station.
+        # If we're currently within 5%, and we'll maintain our margin, exceed that order by 0.01.
+        # Margin is currently 10% globally until the order logic object comes into play.
+        # Currently limiting the buy_order logic to orders in the station.
+        minimum_margin = 10.0
+        maximum_price_delta_percentage = 5.0
+        top_buy_order = market_processor.get_top_buy_order(target_order.get("stationID"))
+        if top_buy_order.get("orderID") == target_order.get("orderID"):
+            print("Our order is currently on top: %s" % target_order)
+        else:
+            top_sell_order = market_processor.get_top_sell_order(target_order.get("stationID"))
+            expected_gross_profit = top_buy_order.get("price") - top_sell_order.get("price")
+            expected_margin = (expected_gross_profit/top_sell_order.get("price")) * 100
+            if expected_margin > minimum_margin:
+                price_delta = top_buy_order.get("price") - target_order.get("price")
+                delta_percentage = (price_delta / top_buy_order.get("price")) * 100
+                if delta_percentage < maximum_price_delta_percentage:
+                    # We'll naively make at least our minimum margin, and the leading order hasn't moved so much as to be alarming.
+                    target_price = top_buy_order.get("price") + 0.01
+                    self.modify_order(target_order, target_price, snapshot)
+                else:
+                    print("Price percentage exceeded for %s" % target_order)
+            else:
+                print("Margin minimum not met for %s" % target_order)
+
+
+
+
+    def _manipulate_sell_order(self, market_processor, target_order):
+        pass
+
     def modify_order(self, order, price_change, snapshot):
         # Edit an order, changing the price to the provided value.
         # Click on the order to bring up the interaction prompt.
@@ -752,7 +824,7 @@ class GameManipulator(object):
         self.main_window.application_snapshot()
         modify_template_result = self.main_window.template_check(self.main_window.screenshot, MODIFY_TEMPLATE)
         # TODO: Actually change the price.
-
+        print("Changing item %s to price %s" % (order.get("itemName"), price_change))
 
         # Locate where the Ok button is within the template.
         ok_button = self.modify_template_parser.find_word("Cancel", self.modify_template_parser.parsed_words)
