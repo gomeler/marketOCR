@@ -521,19 +521,19 @@ class ExportMarketOrderProcessor(ExportOrderProcessor):
         ok = parser.find_word("OK", parser.parsed_words)
         return market, ok
 
-    def get_top_buy_order(self, stationID=None):
+    def get_max_buy_order(self, stationID=None):
         # Working against the stored orders in self.buy_orders, return the highest order in regards to price.
         orders = self.buy_orders
         if stationID:
             orders = [order for order in self.buy_orders if order.get("stationID") == stationID]
-        return max(orders, key= lambda x:x["price"])
+        return max(orders, key= lambda x:float(x["price"]))
 
-    def get_top_sell_order(self, stationID=None):
+    def get_min_sell_order(self, stationID=None):
         # Working against the stored orders in self.sell_orders, return the lowest order in regards to price.
         orders = self.sell_orders
         if stationID:
             orders = [order for order in self.sell_orders if order.get("stationID") == stationID]
-        return min(orders, key = lambda x:x["price"])
+        return min(orders, key = lambda x:float(x["price"]))
 
 class ExportWalletOrderProcessor(ExportOrderProcessor):
     def locate_keywords(self):
@@ -550,11 +550,12 @@ class ExportWalletOrderProcessor(ExportOrderProcessor):
 class GameManipulator(object):
     # GameManipulator consumes the output of ExportOrderProcessor and interacts with the game to manipulate orders.
     # It will work with both the screen and HOCR results, which are based on a screenshot starting at 0,0
-    def __init__(self, main_window, main_parser, mouse, orderbook):
+    def __init__(self, main_window, main_parser, mouse, orderbook, traderules):
         self.main_window = main_window
         self.main_parser = main_parser
         self.mouse = mouse
         self.orderbook = orderbook
+        self.traderules = traderules
         self.market_orders = None
         self.buy_snapshot = None
         self.sell_snapshot = None
@@ -767,37 +768,11 @@ class GameManipulator(object):
 
 
     def _manipulate_buy_order(self, market_processor, target_order, snapshot):
-        # Buy orders are the easier order type to handle.
-        # Until an order logic object is implemented, this is the logic I will use:
-        # Check if our order is the highest order within the station.
-        # If so, leave the order alone.
-        # Otherwise, check to see what the highest order is within the station.
-        # If we're currently within 5%, and we'll maintain our margin, exceed that order by 0.01.
-        # Margin is currently 10% globally until the order logic object comes into play.
-        # Currently limiting the buy_order logic to orders in the station.
-        minimum_margin = 10.0
-        maximum_price_delta_percentage = 5.0
-        top_buy_order = market_processor.get_top_buy_order(target_order.get("stationID"))
-        if top_buy_order.get("orderID") == target_order.get("orderID"):
-            print("Our order is currently on top: %s" % target_order)
-        else:
-            top_sell_order = market_processor.get_top_sell_order(target_order.get("stationID"))
-            expected_gross_profit = top_buy_order.get("price") - top_sell_order.get("price")
-            expected_margin = (expected_gross_profit/top_sell_order.get("price")) * 100
-            if expected_margin > minimum_margin:
-                price_delta = top_buy_order.get("price") - target_order.get("price")
-                delta_percentage = (price_delta / top_buy_order.get("price")) * 100
-                if delta_percentage < maximum_price_delta_percentage:
-                    # We'll naively make at least our minimum margin, and the leading order hasn't moved so much as to be alarming.
-                    target_price = top_buy_order.get("price") + 0.01
-                    self.modify_order(target_order, target_price, snapshot)
-                else:
-                    print("Price percentage exceeded for %s" % target_order)
-            else:
-                print("Margin minimum not met for %s" % target_order)
-
-
-
+        # The default traderules dictate a ~12% minimum margin and a maximimum price change of 15%, to trigger manual review.
+        target_price = self.traderules.negotiate_buy_order(target_order, market_processor)
+        if target_price:
+            print(f"Modifying order with type {target_order.get('itemName')} with current price of {target_order.get('price')} to a new price of {target_price}.")
+            #self.modify_order(target_order, target_price, snapshot)
 
     def _manipulate_sell_order(self, market_processor, target_order):
         pass

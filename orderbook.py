@@ -163,6 +163,9 @@ class Ledger(Orderbook):
                     self.insert_inventory(inventory_entry)
                 # Regardless of volume change, update the order with fresh data.
                 self.update_order(order)
+            else:
+                # New order, add it to the books.
+                self.insert_order(order)
 
     def _process_order_diff(self, existing_order, new_order):
         # existing_order = entry in the database, new_order = line from marketorder csv

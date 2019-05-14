@@ -54,9 +54,14 @@ class TradeRules(object):
     def negotiate_buy_order(self, target_order, market_processor):
         rules = self.get_rules(target_order.get("typeID"))
         top_buy_order = market_processor.get_max_buy_order(target_order.get("stationID"))
+        if top_buy_order.get("orderID") == target_order.get("orderID"):
+            # Quick short circuit, if the top competing order is ours, this is a no-op.
+            print(f"Order of type {target_order.get('itemName')} is currently the top order with a current price of {target_order.get('price')}.")
+            return None
         top_sell_order = market_processor.get_min_sell_order(target_order.get("stationID"))
         expected_gross_profit = float(top_sell_order.get("price")) - float(top_buy_order.get("price"))
         expected_margin = (expected_gross_profit/float(top_sell_order.get("price"))) * 100
+        # If there is money to be made between the top buy/sell orders, and we're not the top buy order, do some math to see if we can update.
         if expected_margin > rules["buy"].get("margin"):
             price_delta = float(top_buy_order.get("price")) - float(target_order.get("price"))
             delta_percentage = (price_delta / float(top_buy_order.get("price"))) * 100
