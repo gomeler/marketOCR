@@ -46,6 +46,7 @@ import screeninteraction
 # Static templates used for checking the screen for standard elements.
 ORDER_TEMPLATE = "templates/order_template.png"
 MODIFY_TEMPLATE = "templates/modify_order_template.png"
+PRICE_WARNING_TEMPLATE = "templates/price_warning_template.png"
 
 class Screenshot(object):
     def __init__(self, windowname):
@@ -536,9 +537,9 @@ class ExportMarketOrderProcessor(ExportOrderProcessor):
         # Filter the provided orders, returning only the orders that are either within the station, or within range of the provided station.
         # If include_ranged is set, include ranged orders that reach this station.
         if include_ranged:
-            return [order for order in self.buy_orders if order.get("stationID") == stationID or int(order.get("jumps")) <= int(order.get("range"))]
+            return [order for order in orders if order.get("stationID") == stationID or int(order.get("jumps")) <= int(order.get("range"))]
         else:
-            return [order for order in self.buy_orders if order.get("stationID") == stationID]
+            return [order for order in orders if order.get("stationID") == stationID]
 
 class ExportWalletOrderProcessor(ExportOrderProcessor):
     def locate_keywords(self):
@@ -785,10 +786,11 @@ class GameManipulator(object):
         # Edit an order, changing the price to the provided value.
         print(f"Changing item {order.get('itemName')} price from {order.get('price')} to {price_change}. Hit F1 to confirm, F2 to skip.")
         self.mouse.listen_keyboard_block()
-        print(self.mouse.key)
-        print(self.mouse.key == Key.f1)
+        if self.mouse.key == Key.f1:
+            self.modify_order_menu(order, snapshot)
+            self.modify_order_interface(price_change)
+            self.modify_order_price_warning()
         self.mouse.set_key(None)
-        print(self.mouse.key)
 
     def modify_order_menu(self, order, snapshot):
         # Brings up the right-click menu on the target order, and selects Modify.
@@ -820,6 +822,28 @@ class GameManipulator(object):
         ok_button = self.modify_template_parser.find_word("OK", self.modify_template_parser.parsed_words)
         ok_button_mouse_coords = self.mouse.calculate_point_from_bbox(ok_button, offset_bbox=modify_template_result)
         self.mouse.click(ok_button_mouse_coords)
+
+    def modify_order_price_warning(self):
+        # The order modification stack sometimes triggers a warning about the proposed price being very low.
+        # That shouldn't be an issue, we're in theory making educated decisions based on market data.
+        # Give it a second for the alert to pop.
+        time.sleep(0.300)
+        # Confirm the alert.
+        self.main_window.application_snapshot()
+        order_template_result = self.main_window.template_check(self.main_window.screenshot, PRICE_WARNING_TEMPLATE)
+        if order_template_result:
+            print("Price warning detected.")
+            snapshot = Screenshot(self.main_window.windowname)
+            snapshot.find_target_window()
+            # Restrict snapshot to the size of the warning.
+            snapshot.set_bbox(order_template_result)
+            hocr = snapshot.snapshot_resize_parse()
+            parser = HOCRParser()
+            parser.hocr_parse_rescale(hocr, snapshot.resize_factor)
+            # Find the yes button and click it.
+            result = parser.find_word("yes", parser.parsed_words)
+            mouse_coords = self.mouse.calculate_point_from_bbox(result, offset_bbox=snapshot.screenshot_bbox)
+            self.mouse.click(mouse_coords)
 
     def watch_for_template(self, snapshot, template, confidence_val=0.50):
         # Watch for 5x100ms, waiting for the provided template to present itself on the screen.

@@ -1,4 +1,4 @@
-
+import copy
 import time
 import threading
 import random
@@ -237,14 +237,15 @@ class ScreenInteraction(object):
     def calculate_point_from_bbox(self, bbox, offset_bbox=None):
         # tesseract-OCR provides bbox coords for words/lines. With that data we then
         # need to determine a singular point within that bbox to click.
+        tmp_bbox = copy.copy(bbox)
         if offset_bbox:
             # Sometimes functions want to click on something on the screen, but they're operating with a limited snapshot of a portion of the screen. Convert the coordinates for their limited snapshot to the whole window.
-            bbox["left"] = bbox.get("left") + offset_bbox.get("left")
-            bbox["right"] = bbox.get("right") + offset_bbox.get("left")
-            bbox["top"] = bbox.get("top") + offset_bbox.get("top")
-            bbox["bottom"] = bbox.get("bottom") + offset_bbox.get("top")
-        x_coord = random.randint(bbox.get('left'), bbox.get('right'))
-        y_coord = random.randint(bbox.get('top'), bbox.get('bottom'))
+            tmp_bbox["left"] = tmp_bbox.get("left") + offset_bbox.get("left")
+            tmp_bbox["right"] = tmp_bbox.get("right") + offset_bbox.get("left")
+            tmp_bbox["top"] = tmp_bbox.get("top") + offset_bbox.get("top")
+            tmp_bbox["bottom"] = tmp_bbox.get("bottom") + offset_bbox.get("top")
+        x_coord = random.randint(tmp_bbox.get('left'), tmp_bbox.get('right'))
+        y_coord = random.randint(tmp_bbox.get('top'), tmp_bbox.get('bottom'))
         return (x_coord, y_coord)
 
     def downscale_bbox(self, bbox, resize_factor):
