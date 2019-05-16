@@ -1,5 +1,6 @@
 
 import time
+import threading
 import random
 
 import numpy
@@ -7,7 +8,10 @@ import win32api
 import win32com
 import win32con
 import win32gui
+import win32clipboard
 
+from pynput import keyboard
+# Guess we should just use pynput for all of this moving forward?
 
 #TODO: There are a lot of sleeps around mouse interactions that might not be necessary.
 # I was running into issues where the interface seemed to be lagging and the mouse was
@@ -167,6 +171,9 @@ VK_CODE = {'backspace':0x08,
 class ScreenInteraction(object):
     def __init__(self, gamewindow):
         self.window = gamewindow
+        self.keyboard_listener = keyboard.Listener(on_press=self.on_press)
+        self.lock = threading.Lock()
+        self.key = None
 
     def set_window_active(self):
         # For testing purposes, need to make the target window the active window.
@@ -296,3 +303,62 @@ class ScreenInteraction(object):
         '''
         for i in args:
                win32api.keybd_event(VK_CODE[i], 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    def get_clipboard(self):
+        win32clipboard.OpenClipboard()
+        text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+        win32clipboard.CloseClipboard()
+        return text
+
+    def set_clipboard(self, text):
+        win32clipboard.OpenClipboard()
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardText(text, win32clipboard.CF_TEXT)
+        win32clipboard.CloseClipboard()
+
+    def paste_clipboard(self):
+        self.pressAndHold("ctrl")
+        self.press("v")
+        self.release("ctrl")
+
+    def listen_keyboard(self):
+        self.keyboard_listener = keyboard.Listener(on_press=self.on_press)
+        self.keyboard_listener.start()
+
+    def listen_keyboard_block(self):
+        with keyboard.Listener(on_press=self.on_press_blocking) as listener:
+            listener.join()
+
+    def stop_listen_keyboard(self):
+        self.keyboard_listener.stop()
+
+    def on_press(self, key):
+        if key in [keyboard.Key.f1, keyboard.Key.f2, keyboard.Key.f3, keyboard.Key.f4]:
+            # These are special control keys.
+            self.set_key(key)
+        elif key == keyboard.Key.f5:
+            # Special control, stops the listener.
+            self.lock.acquire()
+            self.stop_listen_keyboard()
+            self.lock.release()
+        else:
+            print(f"Key pressed: {key}")
+
+    def on_press_blocking(self, key):
+        if key in [keyboard.Key.f1, keyboard.Key.f2, keyboard.Key.f3, keyboard.Key.f4]:
+            # These are special control keys.
+            print(f"Key pressed: {key}")
+            self.set_key(key)
+        #elif key == keyboard.Key.f5:
+        #    # Special control, stops the listener.
+        #    self.lock.acquire()
+        #    self.stop_listen_keyboard()
+        #    self.lock.release()
+        else:
+            print(f"Key pressed: {key}")
+        return False
+
+    def set_key(self, key=None):
+            self.lock.acquire()
+            self.key = key
+            self.lock.release()

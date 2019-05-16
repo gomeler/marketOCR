@@ -2,6 +2,7 @@ from PIL import Image
 from ctypes import windll
 from html.parser import HTMLParser
 from fuzzywuzzy import fuzz
+from pynput.keyboard import Key
 
 
 import bs4 as beautifulsoup
@@ -460,7 +461,7 @@ class ExportOrderProcessor(object):
         self.mouse.press("enter")
 
         # Get data from the clipboard.
-        text = self.get_clipboard()
+        text = self.mouse.get_clipboard()
         return text
 
     def process_market_order_alert(self, text):
@@ -503,12 +504,6 @@ class ExportOrderProcessor(object):
                 sell_orders.append(order)
         return buy_orders, sell_orders
 
-    def get_clipboard(self):
-        win32clipboard.OpenClipboard()
-        text = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
-        win32clipboard.CloseClipboard()
-        return text
-
 class ExportMarketOrderProcessor(ExportOrderProcessor):
     def locate_keywords(self):
         # This needs to be implemented for each sub-class. This should locate the Export/Export to File buttons for wallet/market exports respectively.
@@ -521,19 +516,29 @@ class ExportMarketOrderProcessor(ExportOrderProcessor):
         ok = parser.find_word("OK", parser.parsed_words)
         return market, ok
 
-    def get_max_buy_order(self, stationID=None):
+    def get_max_buy_order(self, stationID=None, include_ranged=True):
         # Working against the stored orders in self.buy_orders, return the highest order in regards to price.
+        # If passed a stationID, we base all our decisions with the station being center.
+        # Otherwise we work against all orders available in the region.
         orders = self.buy_orders
         if stationID:
-            orders = [order for order in self.buy_orders if order.get("stationID") == stationID]
+            orders = self.filter_orders(orders, stationID, include_ranged)
         return max(orders, key= lambda x:float(x["price"]))
 
-    def get_min_sell_order(self, stationID=None):
-        # Working against the stored orders in self.sell_orders, return the lowest order in regards to price.
+    def get_min_sell_order(self, stationID=None, include_ranged=False):
+        # Very similar to get_max_buy_order, except we typically operate against ONLY station orders. Leaving include_ranged as an option just in case we want to do something against the region's orders.
         orders = self.sell_orders
         if stationID:
-            orders = [order for order in self.sell_orders if order.get("stationID") == stationID]
+            orders = self.filter_orders(orders, stationID, include_ranged)
         return min(orders, key = lambda x:float(x["price"]))
+
+    def filter_orders(self, orders, stationID, include_ranged=True):
+        # Filter the provided orders, returning only the orders that are either within the station, or within range of the provided station.
+        # If include_ranged is set, include ranged orders that reach this station.
+        if include_ranged:
+            return [order for order in self.buy_orders if order.get("stationID") == stationID or int(order.get("jumps")) <= int(order.get("range"))]
+        else:
+            return [order for order in self.buy_orders if order.get("stationID") == stationID]
 
 class ExportWalletOrderProcessor(ExportOrderProcessor):
     def locate_keywords(self):
@@ -766,19 +771,27 @@ class GameManipulator(object):
         else:
             self._manipulate_sell_order(market_processor, target_order)
 
-
     def _manipulate_buy_order(self, market_processor, target_order, snapshot):
         # The default traderules dictate a ~12% minimum margin and a maximimum price change of 15%, to trigger manual review.
         target_price = self.traderules.negotiate_buy_order(target_order, market_processor)
         if target_price:
             print(f"Modifying order with type {target_order.get('itemName')} with current price of {target_order.get('price')} to a new price of {target_price}.")
-            #self.modify_order(target_order, target_price, snapshot)
+            self.modify_order(target_order, target_price, snapshot)
 
     def _manipulate_sell_order(self, market_processor, target_order):
         pass
 
     def modify_order(self, order, price_change, snapshot):
         # Edit an order, changing the price to the provided value.
+        print(f"Changing item {order.get('itemName')} price from {order.get('price')} to {price_change}. Hit F1 to confirm, F2 to skip.")
+        self.mouse.listen_keyboard_block()
+        print(self.mouse.key)
+        print(self.mouse.key == Key.f1)
+        self.mouse.set_key(None)
+        print(self.mouse.key)
+
+    def modify_order_menu(self, order, snapshot):
+        # Brings up the right-click menu on the target order, and selects Modify.
         # Click on the order to bring up the interaction prompt.
         mouse_coords = self.mouse.calculate_point_from_bbox(order.get("bbox"), offset_bbox=snapshot.screenshot_bbox)
         self.mouse.click(mouse_coords, click_type="right")
@@ -793,16 +806,18 @@ class GameManipulator(object):
         # Click on modify from the right click order menu.
         modify_mouse_coords = self.mouse.calculate_point_from_bbox(modify_coords, offset_bbox=order_template_result)
         self.mouse.click(modify_mouse_coords)
-
         self.watch_for_template(self.main_window, MODIFY_TEMPLATE)
+
+    def modify_order_interface(self, price_change):
+        # Once the modify interface is loaded, we can modify the order.
         # Locate the modify order window on the main window.
         self.main_window.application_snapshot()
         modify_template_result = self.main_window.template_check(self.main_window.screenshot, MODIFY_TEMPLATE)
         # TODO: Actually change the price.
-        print("Changing item %s to price %s" % (order.get("itemName"), price_change))
-
+        self.mouse.set_clipboard(price_change)
+        self.mouse.paste_clipboard()
         # Locate where the Ok button is within the template.
-        ok_button = self.modify_template_parser.find_word("Cancel", self.modify_template_parser.parsed_words)
+        ok_button = self.modify_template_parser.find_word("OK", self.modify_template_parser.parsed_words)
         ok_button_mouse_coords = self.mouse.calculate_point_from_bbox(ok_button, offset_bbox=modify_template_result)
         self.mouse.click(ok_button_mouse_coords)
 
