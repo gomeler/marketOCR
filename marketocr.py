@@ -47,6 +47,8 @@ import screeninteraction
 ORDER_TEMPLATE = "templates/order_template.png"
 MODIFY_TEMPLATE = "templates/modify_order_template.png"
 PRICE_WARNING_TEMPLATE = "templates/price_warning_template.png"
+WALLET_EXPORT_TEMPLATE = "templates/wallet_export_template.png"
+MARKET_EXPORT_TEMPLATE = "templates/market_export_template.png"
 
 class Screenshot(object):
     def __init__(self, windowname):
@@ -177,6 +179,17 @@ class Screenshot(object):
         if len(template) > 0:
             return self.template_match(image, template)
         raise Exception("Failed to load template file: %s", template_filename)
+
+    def watch_for_template(self, template, confidence_val=0.50):
+        # Watch for 5x100ms, waiting for the provided template to present itself on the screen.
+        for i in range(5):
+            self.application_snapshot()
+            template_match_attempt = self.template_check(self.screenshot, template)
+            if template_match_attempt.get("max_confidence_val") > confidence_val:
+                return template_match_attempt
+            else:
+                time.sleep(0.100)
+        raise Exception("Failed to detect template: %s" % template)
 
     def snapshot_resize_parse(self):
         # This pattern happens a lot, might as well lump this into one call.
@@ -349,6 +362,7 @@ class ExportOrderProcessor(object):
         self.parser = None
         self.market_orders = None
         self.order_directory = None
+        self.template = None
 
     def locate_keywords(self):
         # This needs to be implemented for each sub-class. This should in theory just locate Export/Export to File for wallet/market exports respectively.
@@ -368,30 +382,27 @@ class ExportOrderProcessor(object):
 
         # This will create a prompt that we will interact with to ascertain the location of the market log.
         # First detect the alert on the screen.
-        # TODO: save the location of the prompt for re-use. If we run this frequently, we can snapshot
-        # a limited part of the screen just to verify the OK and Personal Market Export components are visible.
-        personal_market_export, ok_button = self.map_export_alert()
+        export_alert_coords = self.map_export_alert()
 
-        # With the key words located, we can interact with the prompt and pull out the alert.
-        # There are some assumptions made from looking at this prompt. text_bbox is roughly in the middle
-        # of the prompt, which is sufficient for our requirements.
-        separation = ok_button.get("top") - personal_market_export.get("bottom")
-        mid_point = personal_market_export.get("bottom") + int(separation)/2
-        top = mid_point - int(separation/6)
-        bottom = mid_point + int(separation/6)
+        # With the export alert available, extract the text out of the alert.
+        # There are some assumptions made around the dimensions of the prompt and the location of the text block.
+        export_width = export_alert_coords.get("right") - export_alert_coords.get("left")
+        export_height = export_alert_coords.get("bottom") - export_alert_coords.get("top")
+        export_height_center = export_alert_coords.get("top") + int(export_height/2)
+        # The assumptions here are that the text box comprises most of the width of the object.
+        # The text box resides in roughly the middle 1/3 of the object's height.
         text_bbox = {
-            "left": personal_market_export.get("left"),
-            "right": personal_market_export.get("right"),
-            "top": int(top),
-            "bottom": int(bottom)
+            "left": export_alert_coords.get("right") - int(export_width*(5/6)),
+            "right": export_alert_coords.get("left") + int(export_width*(5/6)),
+            "top": export_height_center - int(export_height*0.1),
+            "bottom": export_height_center + int(export_height*0.2)
         }
+
         # text_bbox comes from a full-screen screenshot, no offset required.
         text_coords = self.mouse.calculate_point_from_bbox(text_bbox)
-        print(f"Alert coords at:{text_coords}")
 
         # With the generated coordinates, copy the alert text
         alert_text = self.copy_export_alert(text_coords)
-        print(f"Alert text: {alert_text}")
 
         # The alert text contains a filename and directory where the market order was exported to.
         order_directory, order_file = self.process_market_order_alert(alert_text)
@@ -424,28 +435,14 @@ class ExportOrderProcessor(object):
         export_coords = self.mouse.calculate_point_from_bbox(export_button, offset_bbox=self.screenshot.screenshot_bbox)
         self.mouse.click(export_coords, click_type="left")
 
-    def snapshot_export_alert(self):
-        #TODO: use cv2 template matching to watch the screen
-        # https://opencv-python-tutroals.readthedocs.io/en/latest/py_tutorials/py_imgproc/py_template_matching/py_template_matching.html
-        screenshot = Screenshot(self.screenshot.windowname)
-        screenshot.find_target_window()
-        hocr = screenshot.snapshot_resize_parse()
-
-        # Parse the result.
-        hocrparser = HOCRParser()
-        hocrparser.hocr_parse_rescale(hocr, screenshot.resize_factor)
-        return hocrparser
-
     def map_export_alert(self):
         # This alert is a temporary prompt. We will create temporary snapshot/parser objects vs juggling the main screen objects.
-        time.sleep(1) # Uhh.. we might be moving faster than the EVE client can render stuff.
-        # Scrape the screen for the export window.
-        parser = self.snapshot_export_alert()
-
-        # We will key off of two keywords, OK, and Personal Market Export.
-        # These two keywords have a very high hit-rate with tesseract.
-        personal_market_export, ok_button = self.locate_export_keywords(parser)
-        return personal_market_export, ok_button
+        # Check the screen via template matching for the export window.
+        screenshot = Screenshot(self.screenshot.windowname)
+        screenshot.find_target_window()
+        match_location = screenshot.watch_for_template(self.template, confidence_val=0.80)
+        # This will be the coordinates for the template. 
+        return match_location
 
     def copy_export_alert(self, text_coords):
         # Provided a bbox of the rough location of the alert, copy the text to the clipboard and return it.
@@ -506,6 +503,10 @@ class ExportOrderProcessor(object):
         return buy_orders, sell_orders
 
 class ExportMarketOrderProcessor(ExportOrderProcessor):
+    def __init__(self, screenshot, mouse, type_processor):
+        super().__init__(screenshot, mouse, type_processor)
+        self.template = MARKET_EXPORT_TEMPLATE
+
     def locate_keywords(self):
         # This needs to be implemented for each sub-class. This should locate the Export/Export to File buttons for wallet/market exports respectively.
         return self.parser.find_word("Export", self.parser.parsed_words)
@@ -542,6 +543,10 @@ class ExportMarketOrderProcessor(ExportOrderProcessor):
             return [order for order in orders if order.get("stationID") == stationID]
 
 class ExportWalletOrderProcessor(ExportOrderProcessor):
+    def __init__(self, screenshot, mouse, type_processor):
+        super().__init__(screenshot, mouse, type_processor)
+        self.template = WALLET_EXPORT_TEMPLATE
+
     def locate_keywords(self):
         # This needs to be implemented for each sub-class. This should in theory just locate Export/Export to File for wallet/market exports respectively.
         return self.parser.find_word("Export", self.parser.parsed_words)
@@ -831,7 +836,7 @@ class GameManipulator(object):
         # Confirm the alert.
         self.main_window.application_snapshot()
         order_template_result = self.main_window.template_check(self.main_window.screenshot, PRICE_WARNING_TEMPLATE)
-        if order_template_result:
+        if order_template_result.get("max_confidence_val") > 0.80:
             print("Price warning detected.")
             snapshot = Screenshot(self.main_window.windowname)
             snapshot.find_target_window()
