@@ -21,6 +21,8 @@ import win32com.client
 import random
 import csv
 import copy
+import operator
+import itertools
 
 import screeninteraction
 
@@ -705,23 +707,72 @@ class GameManipulator(object):
             coords = self.sell_coords
             orders = self.market_orders.get("sell")
 
-        visible_orders = []
-        for order in orders:
-            # This will need better logic at some point to handle partial matches and stuff. This works for testing purposes. Moving on!
-            copy_order = copy.deepcopy(order)
-            matched_lines = parser.find_partial_words(order.get("itemName"), parser.parsed_lines)
-            if len(matched_lines) == 1:
-                copy_order["bbox"] = matched_lines[0]
-                copy_order["found"] = True
-            elif len(matched_lines) > 1:
-                copy_order["bbox"] = matched_lines
-                copy_order["found"] = False
-            else:
-                copy_order["bbox"] = None    
-                copy_order["found"] = False
-            visible_orders.append(copy_order)
+        # It is routine to have several orders for the same item, typically on the sell-side of operations.
+        # Because of this, lump together orders based on item type.
+        keyfunc = operator.itemgetter('itemName')
+        data = sorted(orders, key=keyfunc)
+        matched_orders = {}
+        for key, group in itertools.groupby(data, key=keyfunc):
+            matched_orders[key] = list(group)
 
-        return visible_orders
+        filtered_orders = []
+
+        for key, orders in matched_orders.items():
+            if len(orders) == 1:
+                # In the event that we have a single order of this type, we can simply check to see if it is visible in the wallet.
+                filtered_orders.append(self.search_for_order(orders[0], parser))
+            elif len(orders) > 1:
+                # In the event that we have more than one order of this type, we have to do some more convoluted matching.
+                # TODO: Currently if an order isn't seen, it gets dropped. It might be important to keep track of orders we've encountered so we don't double match on repeated calls to parse_snapshot.
+                filtered_orders.extend(self.search_for_multiple_orders(key, orders, parser, snapshot))
+        return filtered_orders
+
+    def search_for_order(self, order, parser):
+        # This assumes there will be a single match for the order within the wallet snapshot.
+        matched_lines = parser.find_partial_words(order.get("itemName"), parser.parsed_lines)
+        if len(matched_lines) == 1:
+            order["bbox"] = matched_lines[0]
+            order["found"] = True
+        elif len(matched_lines) > 1:
+            order["bbox"] = matched_lines
+            order["found"] = False
+        else:
+            order["bbox"] = None
+            order["found"] = False
+        return order
+
+    def search_for_multiple_orders(self, itemType, orders, parser, snapshot):
+        # We have multiple orders for a single item. Do our best to map orders to what's on screen.
+        # TODO: I expect this to be incredibly slow. Probably need to think hard about how to solve this problem.
+        linked_orders = []
+        matched_lines = parser.find_partial_words(itemType, parser.parsed_lines)
+        for line in matched_lines:
+            # TODO: This is a hack. Sometimes the parser picks up the word 'Type '. I believe the snapshot needs to be more tightly restricted to eliminate that top row.
+            if line.get("word").strip().lower() == "type":
+                pass
+            # Click on the order in-game and copy the text to the clipboard.
+            mouse_coords = self.mouse.calculate_point_from_bbox(line, offset_bbox=snapshot.screenshot_bbox)
+            self.mouse.click(mouse_coords)
+            time.sleep(0.125)
+            self.mouse.pressAndHold("ctrl")
+            self.mouse.press("c")
+            self.mouse.release("ctrl")
+            # Process the in-game text, this should match with an order that we know about.
+            text = self.mouse.get_clipboard()
+            stripped_text = text.replace(itemType, '').split()
+            # The game text includes commas in numbers, need to strip that.
+            price = stripped_text[1].replace(",", "")
+            # The line will consist of $volRemaining/$volEntered $price $stationName blahblahblah
+            # For now just match on price, at some point it might be necessary to match on volume values.
+            matching_orders = [order for order in orders if order.get('price') in price]
+            if len(matching_orders) > 1:
+                raise Exception(f"Matched with multiple orders, guess we needed volume matching also {matching_orders}")
+            elif len(matching_orders) == 1:
+                matched_order = matching_orders[0]
+                matched_order["found"] = True
+                matched_order["bbox"] = line
+                linked_orders.append(matched_order)
+        return linked_orders
 
     def load_order_market(self, order, snapshot):
         # Double clicking on the item will cause the market to load.
